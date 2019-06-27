@@ -6,6 +6,7 @@ const crypto = require('crypto');
 const express = require('express');
 const logger = require('heroku-logger');
 const passport = require('passport');
+const Op = require('sequelize').Op;
 
 const db = require('../db');
 const graph = require('../graph');
@@ -49,6 +50,63 @@ router.route('/register')
       });
   });
 
+router.route('/page_install')
+  .get((req, res, next) => {
+    if (!req.query.code) {
+      return res
+        .status(400)
+        .render('error', {message: 'No code received.'});
+    }
+    graph('oauth/access_token')
+      .qs({
+        client_id: process.env.APP_ID,
+        client_secret: process.env.APP_SECRET,
+        redirect_uri: process.env.BASE_URL + '/page_install',
+        code: req.query.code,
+      })
+      .send()
+      .then(tokenResponse => {
+        return Promise.all([
+          graph('me')
+            .token(tokenResponse.access_token)
+            .qs({ fields: 'name' })
+            .send(),
+          graph('community')
+            .token(tokenResponse.access_token)
+            .qs({ fields: 'install,name' })
+            .send()
+        ])
+        .then(responses => {
+          const pageResponse = responses[0];
+          const communityResponse = responses[1];
+          return db.models.page
+            .findById(pageResponse.id)
+            .then(page => {
+              if (page) {
+                return page.update({
+                  name: pageResponse.name,
+                  accessToken: tokenResponse.access_token,
+                });
+              } else {
+                return db.models.page.create({
+                  id: pageResponse.id,
+                  name: pageResponse.name,
+                  accessToken: tokenResponse.access_token,
+                  communityId: communityResponse.id,
+                  communityName: communityResponse.name,
+                  installId: communityResponse.install.id,
+                });
+              }
+            });
+        })}
+      )
+      .then(page => {
+        const state = req.query.state;
+        res.render('pageInstallSuccess', {page, state});
+      })
+      .catch(next);
+  });
+
 router.route('/community_install')
   .get((req, res, next) => {
     if (!req.query.code) {
@@ -64,25 +122,26 @@ router.route('/community_install')
         code: req.query.code,
       })
       .send()
-      .then(tokenResponse => graph('community')
-        .token(tokenResponse.access_token)
-        .qs({ fields: 'name' })
-        .send()
-        .then(communityResponse => db.models.community
-          .findById(communityResponse.id)
-          .then(community => {
-            if (community) {
-              return community.update({accessToken: tokenResponse.access_token});
-            } else {
-              return db.models.community.create({
-                id: communityResponse.id,
-                name: communityResponse.name,
-                accessToken: tokenResponse.access_token,
-              });
-            }
-          })
-        )
-      )
+      .then(tokenResponse => {
+        return graph('community')
+          .token(tokenResponse.access_token)
+          .qs({ fields: 'name' })
+          .send()
+          .then(communityResponse => db.models.community
+            .findById(communityResponse.id)
+            .then(community => {
+              if (community) {
+                return community.update({accessToken: tokenResponse.access_token});
+              } else {
+                return db.models.community.create({
+                  id: communityResponse.id,
+                  name: communityResponse.name,
+                  accessToken: tokenResponse.access_token,
+                });
+              }
+            })
+          );
+      })
       .then(community => {
         const redirect = req.query.redirect_uri;
         const state = req.query.state;
@@ -129,5 +188,37 @@ router.route('/link_account')
     }
     return res.redirect('/link_account_confirm');
   });
+
+router.route('/delete_callbacks')
+  .post((req, res, next) => db.models.callback
+    .destroy({truncate: true})
+    .then(() => res.redirect('/callbacks')),
+  );
+
+router.route('/callbacks')
+  .get((req, res, next) => db.models.callback
+    .findAll({
+      where: filterCallbacks(req),
+      order: [['createdAt', 'DESC']]
+    })
+    .then(callbacks => res.render('callbacks', {callbacks}))
+    .catch(next),
+  );
+
+function filterCallbacks(req) {
+  const filter = req.query.topic;
+  switch (filter) {
+    case 'page':
+    case 'group':
+    case 'link':
+      return {
+        path: {
+          [Op.like]: '%' + filter + '%'
+        }
+      };
+    default:
+      return {};
+  }
+}
 
 module.exports = router;
