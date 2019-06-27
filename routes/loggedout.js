@@ -6,6 +6,7 @@ const crypto = require('crypto');
 const express = require('express');
 const logger = require('heroku-logger');
 const passport = require('passport');
+const Op = require('sequelize').Op;
 
 const db = require('../db');
 const graph = require('../graph');
@@ -56,6 +57,10 @@ router.route('/community_install')
         .status(400)
         .render('error', {message: 'No code received.'});
     }
+
+    // console.log('---------- INSTALL -----------');
+    // console.log(req.query.code);
+    // console.log('---------- INSTALL -----------');
     graph('oauth/access_token')
       .qs({
         client_id: process.env.APP_ID,
@@ -64,7 +69,9 @@ router.route('/community_install')
         code: req.query.code,
       })
       .send()
-      .then(tokenResponse => graph('community')
+      .then(tokenResponse => {
+        console.log(tokenResponse);
+        return graph('community')
         .token(tokenResponse.access_token)
         .qs({ fields: 'name' })
         .send()
@@ -82,7 +89,7 @@ router.route('/community_install')
             }
           })
         )
-      )
+      })
       .then(community => {
         const redirect = req.query.redirect_uri;
         const state = req.query.state;
@@ -129,5 +136,37 @@ router.route('/link_account')
     }
     return res.redirect('/link_account_confirm');
   });
+
+router.route('/delete_callbacks')
+  .post((req, res, next) => db.models.callback
+    .destroy({truncate: true})
+    .then(() => res.redirect('/callbacks')),
+  );
+
+router.route('/callbacks')
+  .get((req, res, next) => db.models.callback
+    .findAll({
+      where: filterCallbacks(req),
+      order: [['createdAt', 'DESC']]
+    })
+    .then(callbacks => res.render('callbacks', {callbacks}))
+    .catch(next),
+  );
+
+function filterCallbacks(req) {
+  const filter = req.query.topic;
+  switch (filter) {
+    case 'page':
+    case 'group':
+    case 'link':
+      return {
+        path: {
+          [Op.like]: '%' + filter + '%'
+        }
+      };
+    default:
+      return {};
+  }
+}
 
 module.exports = router;
